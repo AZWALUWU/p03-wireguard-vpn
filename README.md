@@ -1,73 +1,293 @@
-# 🌐 Self-Hosted WireGuard VPN Server on Google Cloud Platform
-
-This repository documents the step-by-step implementation of a production-ready, self-hosted VPN server. It leverages a **Google Cloud Platform (GCP) e2-micro** instance under the *Always Free Tier*. To ensure seamless connectivity despite dynamic public IP changes, the system is integrated with **DuckDNS** as a Dynamic DNS (DDNS) solution.
-
-## 🗺️ Network Architecture
-The diagram below illustrates the flow of encrypted internet traffic from the local device to the public internet via the Google Cloud infrastructure:
-
-![WireGuard Network Architecture](img/arsitektur-vpn.png)
-
-*Flow Details:* `Client (Phone/Laptop) -> Encrypted Tunnel (UDP 51820) -> GCP Firewall -> Ubuntu VPS (WireGuard) -> IP Forwarding & NAT -> Public Internet`
+Here is the complete, production-ready engineering runbook summarizing every step, command, and script executed throughout this project. You can save this as your master reference note.
 
 ---
 
-## 🚀 Features & Technical Specifications
-* **Cloud Platform:** Google Cloud Platform (e2-micro instance, 2 vCPUs, 1 GB RAM, US-region)
-* **Server OS:** Ubuntu 22.04 LTS
-* **VPN Protocol:** WireGuard (State-of-the-art cryptography)
-* **Dynamic DNS:** DuckDNS with an automated cronjob script syncing the IP address every 5 minutes
-* **Tunneling Type:** Full Tunnel (`AllowedIPs = 0.0.0.0/0`) – Secures and routes all data traffic
+# 📑 Master Runbook: Deploying a Self-Hosted WireGuard VPN on GCP
+
+This comprehensive deployment guide covers everything from provisioning a cloud server to hardening, setting up Dynamic DNS, configuring cryptographic keys, and executing network troubleshooting.
 
 ---
 
-## 🛠️ Implementation Steps
+## Phase 1: Cloud Provisioning & Server Hardening
 
-### 1. VPS Provisioning & Hardening
-* Deployed an `e2-micro` VM Instance in the `us-central1` region with a 30GB Standard Persistent boot disk.
-* Promoted the public IP address from Ephemeral to Static within the VPC Network dashboard.
-* Secured the local server environment using UFW (Uncomplicated Firewall).
+### 1. GCP VM Instance Specifications
 
-![GCP VM Instance Dashboard](img/gcp-instance.png)
+* **Machine Series/Type:** `E2` -> `e2-micro` (2 vCPUs, 1 GB RAM) -> *Always Free Tier*
+* **Region:** `us-central1`, `us-east1`, or `us-west1`
+* **Boot Disk:** Ubuntu 22.04 LTS (Standard Persistent Disk, 30 GB)
+* **IP Configuration:** Promoted public IP from **Ephemeral** to **Static** under *VPC Network > IP Addresses*.
 
-### 2. Free Domain Integration (DuckDNS)
-* Registered a custom subdomain on DuckDNS.
-* Created a automation bash script (`duck.sh`) on the VPS and scheduled it via `crontab` to sync the server's public IP automatically every 5 minutes.
+### 2. OS Update & Initial Firewall Hardening
 
-### 3. WireGuard Installation & Configuration
-* Generated cryptographic keypairs (Public and Private Keys) independently for both the Server and the Client.
-* Enabled IP Forwarding at the Linux kernel level via `/etc/sysctl.conf`.
-* Configured Network Address Translation (NAT) rules using IPTables via the `PostUp` and `PostDown` hooks inside `wg0.conf`.
+Connect to the VPS via SSH and initialize system maintenance and local network security using UFW (Uncomplicated Firewall):
 
-### 4. Client Setup & Connection
-* Constructed the `client.conf` profile and converted it into a scannable QR Code using the `qrencode` utility directly in the terminal.
-* Scanned the QR Code using the official WireGuard client application on an Android/iOS device.
+```bash
+# Update local package index and upgrade all system packages
+sudo apt update && sudo apt upgrade -y
 
----
+# Allow SSH traffic so you don't get locked out
+sudo ufw allow 22/tcp
 
-## 🔍 Case Study & Troubleshooting Mindset
+# Allow incoming WireGuard VPN traffic
+sudo ufw allow 51820/udp
 
-### Issue: "Connected" Status But No Internet Access (The "Ghost Handshake" Problem)
-* **Symptoms:** When the VPN profile was toggled active on the mobile device, the application status indicated a successful connection, but all internet connectivity dropped instantly.
-* **Analysis & Diagnosis:** I ran the `sudo wg show` command in the VPS terminal to monitor active tunnel traffic. The output revealed that the `latest handshake` field was completely empty and no data bytes were being `received`. This diagnosed that the UDP packets sent from the client were being blocked by the cloud security layers before ever reaching the WireGuard application daemon.
-* **Resolution:** I inspected the **GCP VPC Network > Firewall** rules and confirmed that the WireGuard port was blocked by default. I created a new *Ingress Firewall Rule* to explicitly allow **UDP port 51820** from any source IP address (`0.0.0.0/0`). Once the rule was provisioned, handshakes completed within milliseconds, and internet routing was restored.
+# Enable the firewall (press 'y' and Enter to confirm)
+sudo ufw enable
 
-![GCP Firewall Rule](img/gcp-firewall.png)
+# Verify firewall status
+sudo ufw status verbose
+
+```
 
 ---
 
-## 📊 Verification & Proof of Concept
+## Phase 2: Dynamic DNS Setup (DuckDNS Integration)
 
-Following the firewall resolution, here is the empirical proof showing the active WireGuard client status and the successful redirection of all internet traffic through Google's cloud infrastructure:
+To handle dynamic IP shifts gracefully, a script automatically pings DuckDNS to map your domain to the server's current public IP.
 
-| WireGuard Client Status | IP & ISP Detection (Whoer.net) |
-|---|---|
-| ![WireGuard Client](img/wireguard-client.png) | ![Whoer Proof](img/bukti-whoer.png) |
+### 1. Automated DDNS Script
 
-*The evaluation on Whoer.net clearly shows that the public ISP is detected as **Google LLC**, validating that the data encryption layer and the server-side NAT mechanism are functioning 100% perfectly.*
+Create a directory and write the update script:
+
+```bash
+mkdir ~/duckdns && cd ~/duckdns
+nano duck.sh
+
+```
+
+**Script Content (`duck.sh`):**
+
+```bash
+#!/bin/bash
+echo url="https://www.duckdns.org/update?domains=YOUR_SUBDOMAIN&token=YOUR_DUCKDNS_TOKEN&ip=" | curl -k -o ~/duckdns/duck.log -K -
+
+```
+
+*(Replace `YOUR_SUBDOMAIN` with your custom prefix and `YOUR_DUCKDNS_TOKEN` with your secret DuckDNS token).*
+
+### 2. Script Permissions & Cron Automation
+
+```bash
+# Grant execution privileges only to the owner
+chmod 700 duck.sh
+
+# Open the cron tab scheduler
+crontab -e
+
+```
+
+Add the following line at the absolute bottom of the crontab file to execute the script every 5 minutes:
+
+```text
+*/5 * * * * ~/duckdns/duck.sh >/dev/null 2>&1
+
+```
+
+**Verification:**
+Run the script manually and check for an `OK` log output:
+
+```bash
+./duck.sh
+cat duck.log
+
+```
 
 ---
 
-## 📂 Repository Structure
-* `configs/wg0-template.conf` : Configuration template for the server environment.
-* `configs/client-template.conf` : Configuration template for the client device.
-*(Note: All production Private Keys have been scrubbed out and replaced with placeholders for security mitigation).*
+## Phase 3: WireGuard Installation & Cryptography
+
+### 1. Install WireGuard Package
+
+```bash
+sudo apt update
+sudo apt install wireguard -y
+
+```
+
+### 2. Cryptographic Keypair Generation
+
+WireGuard relies on asymmetric cryptography. We must generate a public and private key pair for both the server and the client device.
+
+```bash
+# Switch to root to secure key management files
+sudo -i
+cd /etc/wireguard
+umask 077
+
+# Generate Server Keypair
+wg genkey | tee server_private.key | wg pubkey > server_public.key
+
+# Generate Client Keypair
+wg genkey | tee client_private.key | wg pubkey > client_public.key
+
+```
+
+*Note: Use `cat <filename>.key` to view the strings when building configuration profiles.*
+
+### 3. Kernel IP Forwarding Configuration
+
+To turn your Linux server into a functional network router that passes client traffic to the internet, you must enable IPv4 forwarding:
+
+```bash
+nano /etc/sysctl.conf
+
+```
+
+Uncomment or append this line:
+
+```text
+net.ipv4.ip_forward=1
+
+```
+
+Apply the changes instantly without system reboot:
+
+```bash
+sysctl -p
+
+```
+
+---
+
+## Phase 4: Server Network Configuration
+
+### 1. Identify Network Interface
+
+Identify the main interface card name (e.g., `ens4` or `eth0`):
+
+```bash
+ip route list default
+
+```
+
+### 2. Create Server Interface Profile (`wg0.conf`)
+
+```bash
+nano /etc/wireguard/wg0.conf
+
+```
+
+**Configuration Content (`wg0.conf`):**
+
+```text
+[Interface]
+Address = 10.0.0.1/24
+SaveConfig = true
+ListenPort = 51820
+PrivateKey = <INSERT_SERVER_PRIVATE_KEY_STRING>
+
+# NAT and Routing tables invocation upon tunnel startup
+PostUp = ufw route allow in on wg0 && iptables -t nat -A POSTROUTING -o ens4 -j MASQUERADE
+
+# Clean up routing tables upon tunnel shutdown
+PostDown = ufw route delete allow in on wg0 && iptables -t nat -D POSTROUTING -o ens4 -j MASQUERADE
+
+[Peer]
+PublicKey = <INSERT_CLIENT_PUBLIC_KEY_STRING>
+AllowedIPs = 10.0.0.2/32
+
+```
+
+*(Modify `ens4` if your actual network interface card name differs).*
+
+### 3. Start WireGuard Daemon
+
+```bash
+# Bring up the tunnel interface
+wg-quick up wg0
+
+# Enable automatic start upon system boot
+systemctl enable wg-quick@wg0
+
+# Check WireGuard status
+wg show
+
+# Exit root mode back to standard user
+exit
+
+```
+
+---
+
+## Phase 5: Client Configuration & Onboarding
+
+### 1. Generate Client Profile
+
+Create a configuration file to pass down to your mobile phone or laptop:
+
+```bash
+nano ~/client.conf
+
+```
+
+**Configuration Content (`client.conf`):**
+
+```text
+[Interface]
+Address = 10.0.0.2/24
+PrivateKey = <INSERT_CLIENT_PRIVATE_KEY_STRING>
+DNS = 1.1.1.1, 8.8.8.8
+
+[Peer]
+PublicKey = <INSERT_SERVER_PUBLIC_KEY_STRING>
+Endpoint = YOUR_SUBDOMAIN.duckdns.org:51820
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+
+```
+
+*(Setting `AllowedIPs = 0.0.0.0/0` establishes Full Tunneling, ensuring all client internet traffic passes securely through the cloud server).*
+
+### 2. QR Code Generation for Mobile Pairing
+
+```bash
+# Install QR rendering tool
+sudo apt install qrencode -y
+
+# Render configuration profile to the terminal screen
+qrencode -t ansiutf8 < ~/client.conf
+
+```
+
+Scan this QR code using the official WireGuard app on iOS or Android.
+
+---
+
+## Phase 6: Critical Security Troubleshooting (Post-Mortem Analysis)
+
+### The "Connected, but No Internet" Issue
+
+> **Symptom:** The client app claims the tunnel is "Connected", but the device completely loses internet access.
+
+### 🔎 Diagnosis Methodology
+
+Run the monitoring command on the cloud server:
+
+```bash
+sudo wg show
+
+```
+
+* **Observation:** The `latest handshake` and `transfer data received` parameters are completely blank or zero.
+* **Conclusion:** The tunnel is active locally on the phone, but packets are failing to reach the cloud machine. The cloud provider's network boundary is discarding inbound traffic.
+
+### 🛠️ Resolution Action
+
+The server OS is ready, but the cloud infrastructure layer is blocking traffic. You must configure GCP's external ingress policy:
+
+1. Go to **Google Cloud Console > VPC Network > Firewall**.
+2. Click **Create Firewall Rule**.
+3. Apply these explicit network parameters:
+* **Name:** `allow-wireguard`
+* **Targets:** `All instances in the network`
+* **Source IPv4 ranges:** `0.0.0.0/0`
+* **Protocols and ports:** Check **UDP**, enter port `51820`.
+
+
+4. Click **Create**.
+
+### 📊 Empirical Verification
+
+Reconnect the WireGuard client profile. Navigate to `whoer.net` or `icanhazip.com` on the client device.
+
+* **Expected Result:** The detected IP address matches your GCP VM Instance's static public IP, and the detected ISP is explicitly listed as **Google LLC**. This confirms full data path encryption and functional server-side NAT.
